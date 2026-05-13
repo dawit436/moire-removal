@@ -9,6 +9,7 @@ All paths are relative to the directory where this script lives.
 
 import os
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -31,14 +32,18 @@ from models.unet import UNet
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT  = Path(__file__).parent          # directory of this script
-DATA_DIR      = Path("/kaggle/input/datasets/dawitesubalew/moire-pattern-dataset2/data")
+DATA_DIR      = (
+    Path("/kaggle/input/datasets/dawitesubalew/moire-pattern-dataset2/data")
+    if Path("/kaggle").exists()
+    else PROJECT_ROOT / "data"
+)
 CKPT_DIR      = PROJECT_ROOT / "checkpoints"
 CKPT_DIR.mkdir(exist_ok=True)
 
-BATCH_SIZE    = 8
-EPOCHS        = 50
+BATCH_SIZE    = 4
+EPOCHS        = 75
 LR            = 1e-4
-CROP_SIZE     = 256
+CROP_SIZE     = 512
 VAL_FRACTION  = 0.1   # fraction of training data used for validation
 SAVE_EVERY    = 5     # save a checkpoint every N epochs
 L1_WEIGHT     = 0.70
@@ -231,6 +236,10 @@ def main():
                 "val_psnr":    best_psnr,
             }, best_ckpt_path)
             print(f"  ★ New best PSNR {best_psnr:.2f} dB — saved best_model.pth")
+            kaggle_out = Path("/kaggle/working/best_model_attention.pth")
+            if Path("/kaggle").exists():
+                shutil.copy(best_ckpt_path, kaggle_out)
+                print(f"  → Also saved to {kaggle_out}")
 
     print(f"\nTraining complete. Best validation PSNR: {best_psnr:.2f} dB")
 

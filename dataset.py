@@ -28,7 +28,7 @@ class MoireDataset(Dataset):
     Both directories are scanned and matched by their leading numeric index.
     """
 
-    def __init__(self, root_dir: str, split: str = "train", crop_size: int = 256):
+    def __init__(self, root_dir: str, split: str = "train", crop_size: int = 512):
         """
         Args:
             root_dir  : Path to the dataset root (contains train/ and test/).
@@ -97,7 +97,7 @@ class MoireDataset(Dataset):
 
         if self.split == "train":
             # 1. Random crop size variation — multi-scale training
-            crop_size = random.choice([224, 256, 288])
+            crop_size = random.choice([384, 512, 640])
 
             # 2. Random crop (same region for both images)
             i, j, h, w = self._random_crop_params(moire_img, crop_size)
