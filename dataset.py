@@ -1,4 +1,5 @@
 import os
+import random
 import re
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
+from torchvision.transforms import ColorJitter
 
 
 def extract_index(filename):
@@ -31,11 +33,17 @@ class MoireDataset(Dataset):
         Args:
             root_dir  : Path to the dataset root (contains train/ and test/).
             split     : 'train' or 'test'.
-            crop_size : Spatial size of crops fed to the model.
+            crop_size : Spatial size of crops fed to the model (output size).
         """
         assert split in ("train", "test"), "split must be 'train' or 'test'"
         self.split = split
         self.crop_size = crop_size
+
+        # Color jitter applied only to the moiré image to simulate
+        # different screen/camera color responses.
+        self._jitter = ColorJitter(
+            brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05
+        )
 
         moire_dir = Path(root_dir) / split / "moire"
         clean_dir = Path(root_dir) / split / "clean"
@@ -84,18 +92,41 @@ class MoireDataset(Dataset):
         }
 
     def _apply_transforms(self, moire_img, clean_img):
-        """Crop (and optionally augment) both images identically."""
+        """Crop and augment both images with identical spatial transforms;
+        apply color jitter only to the moiré image."""
 
         if self.split == "train":
-            # Random crop: choose the same region for both images
-            i, j, h, w = self._random_crop_params(moire_img)
+            # 1. Random crop size variation — multi-scale training
+            crop_size = random.choice([224, 256, 288])
+
+            # 2. Random crop (same region for both images)
+            i, j, h, w = self._random_crop_params(moire_img, crop_size)
             moire_img = TF.crop(moire_img, i, j, h, w)
             clean_img = TF.crop(clean_img, i, j, h, w)
 
-            # Random horizontal flip with 50 % probability
+            # 3. Resize to output crop_size if the sampled size differs
+            if crop_size != self.crop_size:
+                moire_img = TF.resize(moire_img, [self.crop_size, self.crop_size])
+                clean_img = TF.resize(clean_img, [self.crop_size, self.crop_size])
+
+            # 4. Random horizontal flip (p=0.5)
             if torch.rand(1).item() > 0.5:
                 moire_img = TF.hflip(moire_img)
                 clean_img = TF.hflip(clean_img)
+
+            # 5. Random vertical flip (p=0.5)
+            if torch.rand(1).item() > 0.5:
+                moire_img = TF.vflip(moire_img)
+                clean_img = TF.vflip(clean_img)
+
+            # 6. Random 90° / 180° / 270° rotation (p=0.5)
+            if torch.rand(1).item() > 0.5:
+                angle = random.choice([90, 180, 270])
+                moire_img = TF.rotate(moire_img, angle)
+                clean_img = TF.rotate(clean_img, angle)
+
+            # 7. Color jitter on moiré image only
+            moire_img = self._jitter(moire_img)
 
         else:
             # Center crop for deterministic evaluation
@@ -108,15 +139,15 @@ class MoireDataset(Dataset):
 
         return moire_tensor, clean_tensor
 
-    def _random_crop_params(self, img):
-        """Return (top, left, height, width) for a random crop."""
+    def _random_crop_params(self, img, crop_size: int):
+        """Return (top, left, height, width) for a random crop of given size."""
         w, h = img.size
-        th = tw = self.crop_size
+        th = tw = crop_size
         if w < tw or h < th:
             raise ValueError(
                 f"Image size ({w}×{h}) is smaller than crop size ({tw}×{th}). "
                 "Resize your images or reduce crop_size."
             )
-        top = torch.randint(0, h - th + 1, (1,)).item()
+        top  = torch.randint(0, h - th + 1, (1,)).item()
         left = torch.randint(0, w - tw + 1, (1,)).item()
         return top, left, th, tw

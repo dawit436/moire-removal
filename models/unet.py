@@ -34,79 +34,113 @@ class DownBlock(nn.Module):
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
     def forward(self, x):
-        skip = self.conv(x)   # save before pooling for the skip connection
+        skip = self.conv(x)
         down = self.pool(skip)
         return down, skip
 
 
-class UpBlock(nn.Module):
-    """Bilinear upsampling → concatenate skip → ConvBlock."""
+class AttentionGate(nn.Module):
+    """
+    Soft attention gate applied to encoder skip connections.
 
-    def __init__(self, in_ch, skip_ch, out_ch):
+    g = gating signal (decoder feature, lower resolution)
+    x = skip connection (encoder feature, higher resolution)
+    attention = sigmoid(W_psi(ReLU(W_g(g) + W_x(x) + b)))
+    output    = attention * x
+    """
+
+    def __init__(self, F_g: int, F_l: int, F_int: int):
         super().__init__()
-        # After concatenation the channel count is in_ch + skip_ch
+        self.W_g = nn.Conv2d(F_g, F_int, kernel_size=1, bias=True)
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, kernel_size=1, bias=False),
+            nn.BatchNorm2d(F_int),
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        # Upsample gating signal to match skip connection spatial resolution
+        g1 = F.interpolate(g1, size=x1.shape[2:], mode="bilinear", align_corners=False)
+        attn = self.psi(self.relu(g1 + x1))
+        return x * attn
+
+
+class AttentionUpBlock(nn.Module):
+    """Attention gate on skip → bilinear upsample → concatenate → ConvBlock."""
+
+    def __init__(self, in_ch: int, skip_ch: int, out_ch: int, F_int: int):
+        super().__init__()
+        self.attn = AttentionGate(F_g=in_ch, F_l=skip_ch, F_int=F_int)
         self.conv = ConvBlock(in_ch + skip_ch, out_ch)
 
     def forward(self, x, skip):
-        # Upsample to match the spatial size of the skip-connection feature map
+        attn_skip = self.attn(x, skip)
         x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
-        x = torch.cat([x, skip], dim=1)
+        x = torch.cat([x, attn_skip], dim=1)
         return self.conv(x)
 
 
 # ---------------------------------------------------------------------------
-# U-Net
+# Attention U-Net
 # ---------------------------------------------------------------------------
 
 class UNet(nn.Module):
     """
-    Lightweight U-Net for moiré removal.
+    Attention U-Net for moiré removal.
 
     Architecture
     ------------
-    Encoder (4 stages):  3 → 32 → 64 → 128 → 256
-    Bottleneck:          256 → 512
-    Decoder (4 stages):  512+256→256 → 256+128→128 → 128+64→64 → 64+32→32
+    Encoder (4 stages):  3 → 64 → 128 → 256 → 512
+    Bottleneck:          512 → 512
+    Decoder (4 stages, each with an Attention Gate on the skip connection):
+                         512+512→256 → 256+256→128 → 128+128→64 → 64+64→32
     Head:                32 → 3 (Sigmoid)
 
-    Parameter count ≈ 7 M — fits comfortably in 16 GB VRAM at batch size 8.
+    Parameter count ≈ 13.7 M.
+    Input/output: 3-channel RGB; spatial dimensions must be multiples of 16.
     """
 
-    def __init__(self, in_channels: int = 3, out_channels: int = 3, base_ch: int = 32):
+    def __init__(self, in_channels: int = 3, out_channels: int = 3, base_ch: int = 64):
         super().__init__()
 
         # Encoder
-        self.enc1 = DownBlock(in_channels, base_ch)        # 256 → 128
-        self.enc2 = DownBlock(base_ch,     base_ch * 2)    # 128 → 64
-        self.enc3 = DownBlock(base_ch * 2, base_ch * 4)    # 64  → 32
-        self.enc4 = DownBlock(base_ch * 4, base_ch * 8)    # 32  → 16
+        self.enc1 = DownBlock(in_channels, base_ch)           # skip: base_ch   (64)
+        self.enc2 = DownBlock(base_ch,     base_ch * 2)        # skip: base_ch*2 (128)
+        self.enc3 = DownBlock(base_ch * 2, base_ch * 4)        # skip: base_ch*4 (256)
+        self.enc4 = DownBlock(base_ch * 4, base_ch * 8)        # skip: base_ch*8 (512)
 
         # Bottleneck
-        self.bottleneck = ConvBlock(base_ch * 8, base_ch * 16)  # 16 spatial
+        self.bottleneck = ConvBlock(base_ch * 8, base_ch * 8)
 
-        # Decoder
-        self.dec4 = UpBlock(base_ch * 16, base_ch * 8,  base_ch * 8)
-        self.dec3 = UpBlock(base_ch * 8,  base_ch * 4,  base_ch * 4)
-        self.dec2 = UpBlock(base_ch * 4,  base_ch * 2,  base_ch * 2)
-        self.dec1 = UpBlock(base_ch * 2,  base_ch,      base_ch)
+        # Decoder — each level applies an Attention Gate then ConvBlock
+        self.dec4 = AttentionUpBlock(base_ch * 8, base_ch * 8, base_ch * 4, base_ch * 4)
+        self.dec3 = AttentionUpBlock(base_ch * 4, base_ch * 4, base_ch * 2, base_ch * 2)
+        self.dec2 = AttentionUpBlock(base_ch * 2, base_ch * 2, base_ch,     base_ch)
+        self.dec1 = AttentionUpBlock(base_ch,     base_ch,     base_ch // 2, base_ch // 2)
 
         # Output head
         self.head = nn.Sequential(
-            nn.Conv2d(base_ch, out_channels, kernel_size=1),
-            nn.Sigmoid(),   # keep pixel values in [0, 1]
+            nn.Conv2d(base_ch // 2, out_channels, kernel_size=1),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
-        # --- Encoder ---
+        # Encoder
         x, skip1 = self.enc1(x)
         x, skip2 = self.enc2(x)
         x, skip3 = self.enc3(x)
         x, skip4 = self.enc4(x)
 
-        # --- Bottleneck ---
+        # Bottleneck
         x = self.bottleneck(x)
 
-        # --- Decoder (with skip connections) ---
+        # Decoder (attention gates applied inside AttentionUpBlock)
         x = self.dec4(x, skip4)
         x = self.dec3(x, skip3)
         x = self.dec2(x, skip2)

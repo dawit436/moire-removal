@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -30,7 +31,7 @@ from models.unet import UNet
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT  = Path(__file__).parent          # directory of this script
-DATA_DIR      = PROJECT_ROOT / "data"
+DATA_DIR      = Path("/kaggle/input/datasets/dawitesubalew/moire-pattern-dataset2/data")
 CKPT_DIR      = PROJECT_ROOT / "checkpoints"
 CKPT_DIR.mkdir(exist_ok=True)
 
@@ -40,8 +41,9 @@ LR            = 1e-4
 CROP_SIZE     = 256
 VAL_FRACTION  = 0.1   # fraction of training data used for validation
 SAVE_EVERY    = 5     # save a checkpoint every N epochs
-L1_WEIGHT     = 0.8
-SSIM_WEIGHT   = 0.2   # must sum to 1 with L1_WEIGHT
+L1_WEIGHT     = 0.70
+SSIM_WEIGHT   = 0.15
+FFT_WEIGHT    = 0.15  # weights sum to 1.0
 SEED          = 42
 
 
@@ -73,19 +75,33 @@ def batch_ssim(preds: torch.Tensor, targets: torch.Tensor) -> float:
 # Loss
 # ---------------------------------------------------------------------------
 
-class CombinedLoss(nn.Module):
-    """0.8 × L1  +  0.2 × (1 − SSIM)"""
+def fft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """L1 loss in the frequency domain (magnitude of 2-D FFT)."""
+    pred_mag   = torch.abs(torch.fft.fft2(pred))
+    target_mag = torch.abs(torch.fft.fft2(target))
+    return F.l1_loss(pred_mag, target_mag)
 
-    def __init__(self, l1_w: float = L1_WEIGHT, ssim_w: float = SSIM_WEIGHT):
+
+class CombinedLoss(nn.Module):
+    """0.70 × L1  +  0.15 × (1 − SSIM)  +  0.15 × FFT"""
+
+    def __init__(
+        self,
+        l1_w:   float = L1_WEIGHT,
+        ssim_w: float = SSIM_WEIGHT,
+        fft_w:  float = FFT_WEIGHT,
+    ):
         super().__init__()
         self.l1_w   = l1_w
         self.ssim_w = ssim_w
+        self.fft_w  = fft_w
         self.l1     = nn.L1Loss()
 
     def forward(self, pred, target):
-        l1_loss   = self.l1(pred, target)
-        ssim_loss = 1.0 - compute_ssim(pred, target, data_range=1.0, size_average=True)
-        return self.l1_w * l1_loss + self.ssim_w * ssim_loss
+        l1   = self.l1(pred, target)
+        ssim = 1.0 - compute_ssim(pred, target, data_range=1.0, size_average=True)
+        fft  = fft_loss(pred, target)
+        return self.l1_w * l1 + self.ssim_w * ssim + self.fft_w * fft
 
 
 # ---------------------------------------------------------------------------
