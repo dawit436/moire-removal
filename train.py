@@ -41,7 +41,7 @@ CKPT_DIR      = PROJECT_ROOT / "checkpoints"
 CKPT_DIR.mkdir(exist_ok=True)
 
 BATCH_SIZE    = 4
-EPOCHS        = 75
+EPOCHS        = 50
 LR            = 1e-4
 CROP_SIZE     = 512
 VAL_FRACTION  = 0.1   # fraction of training data used for validation
@@ -175,11 +175,11 @@ def main():
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=2, pin_memory=device.type == "cuda",
+        num_workers=1, pin_memory=device.type == "cuda",
     )
     val_loader = DataLoader(
         val_ds, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=2, pin_memory=device.type == "cuda",
+        num_workers=1, pin_memory=device.type == "cuda",
     )
 
     # ----- Model -----------------------------------------------------------
