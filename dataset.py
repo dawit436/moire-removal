@@ -8,7 +8,6 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
-from torchvision.transforms import ColorJitter
 
 
 def extract_index(filename):
@@ -38,12 +37,6 @@ class MoireDataset(Dataset):
         assert split in ("train", "test"), "split must be 'train' or 'test'"
         self.split = split
         self.crop_size = crop_size
-
-        # Color jitter applied only to the moiré image to simulate
-        # different screen/camera color responses.
-        self._jitter = ColorJitter(
-            brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05
-        )
 
         moire_dir = Path(root_dir) / split / "moire"
         clean_dir = Path(root_dir) / split / "clean"
@@ -92,8 +85,7 @@ class MoireDataset(Dataset):
         }
 
     def _apply_transforms(self, moire_img, clean_img):
-        """Crop and augment both images with identical spatial transforms;
-        apply color jitter only to the moiré image."""
+        """Crop and augment both images with identical spatial transforms."""
 
         if self.split == "train":
             # 1. Random crop size variation — multi-scale training
@@ -124,9 +116,6 @@ class MoireDataset(Dataset):
                 angle = random.choice([90, 180, 270])
                 moire_img = TF.rotate(moire_img, angle)
                 clean_img = TF.rotate(clean_img, angle)
-
-            # 7. Color jitter on moiré image only
-            moire_img = self._jitter(moire_img)
 
         else:
             # Center crop for deterministic evaluation

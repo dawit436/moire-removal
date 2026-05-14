@@ -100,7 +100,7 @@ class UNet(nn.Module):
     Bottleneck:          512 → 512
     Decoder (4 stages, each with an Attention Gate on the skip connection):
                          512+512→256 → 256+256→128 → 128+128→64 → 64+64→32
-    Head:                32 → 3 (Sigmoid)
+    Head:                32 → 3 (Tanh, residual added to input and clamped)
 
     Parameter count ≈ 13.7 M.
     Input/output: 3-channel RGB; spatial dimensions must be multiples of 16.
@@ -124,13 +124,15 @@ class UNet(nn.Module):
         self.dec2 = AttentionUpBlock(base_ch * 2, base_ch * 2, base_ch,     base_ch)
         self.dec1 = AttentionUpBlock(base_ch,     base_ch,     base_ch // 2, base_ch // 2)
 
-        # Output head
+        # Output head — produces a residual (can be negative), added to input
         self.head = nn.Sequential(
             nn.Conv2d(base_ch // 2, out_channels, kernel_size=1),
-            nn.Sigmoid(),
+            nn.Tanh(),
         )
 
     def forward(self, x):
+        moire_input = x  # keep original for residual addition
+
         # Encoder
         x, skip1 = self.enc1(x)
         x, skip2 = self.enc2(x)
@@ -146,7 +148,9 @@ class UNet(nn.Module):
         x = self.dec2(x, skip2)
         x = self.dec1(x, skip1)
 
-        return self.head(x)
+        # Residual learning: predict noise to subtract, not the clean image
+        residual = self.head(x)
+        return torch.clamp(moire_input + residual, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------

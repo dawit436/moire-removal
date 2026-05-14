@@ -81,9 +81,9 @@ def batch_ssim(preds: torch.Tensor, targets: torch.Tensor) -> float:
 # ---------------------------------------------------------------------------
 
 def fft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """L1 loss in the frequency domain (magnitude of 2-D FFT)."""
-    pred_mag   = torch.abs(torch.fft.fft2(pred))
-    target_mag = torch.abs(torch.fft.fft2(target))
+    """L1 loss on log-scaled FFT magnitudes — balances low and high frequencies."""
+    pred_mag   = torch.log1p(torch.abs(torch.fft.fft2(pred)))
+    target_mag = torch.log1p(torch.abs(torch.fft.fft2(target)))
     return F.l1_loss(pred_mag, target_mag)
 
 
