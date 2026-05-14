@@ -243,6 +243,20 @@ def main():
 
     print(f"\nTraining complete. Best validation PSNR: {best_psnr:.2f} dB")
 
+    # Auto-save to Kaggle output and generate download link
+    kaggle_out = Path("/kaggle/working/best_model_attention.pth")
+    if Path("/kaggle").exists():
+        shutil.copy(CKPT_DIR / "best_model.pth", kaggle_out)
+        print(f"\nModel saved to: {kaggle_out}")
+
+        try:
+            from IPython.display import FileLink, display
+            display(FileLink("/kaggle/working/best_model_attention.pth"))
+            print("Click the link above to download the model.")
+        except Exception:
+            print("Run this to download:")
+            print("from IPython.display import FileLink; FileLink('/kaggle/working/best_model_attention.pth')")
+
 
 if __name__ == "__main__":
     main()
