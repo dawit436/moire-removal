@@ -127,7 +127,7 @@ class UNet(nn.Module):
         # Output head — produces a residual (can be negative), added to input
         self.head = nn.Sequential(
             nn.Conv2d(base_ch // 2, out_channels, kernel_size=1),
-            nn.Tanh(),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -150,7 +150,7 @@ class UNet(nn.Module):
 
         # Residual learning: predict noise to subtract, not the clean image
         residual = self.head(x)
-        return torch.clamp(moire_input + residual, 0.0, 1.0)
+        return torch.clamp(moire_input + residual - 0.5, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
