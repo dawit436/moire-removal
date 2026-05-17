@@ -7,6 +7,7 @@ Usage (local or Kaggle):
 All paths are relative to the directory where this script lives.
 """
 
+import copy
 import os
 import math
 import shutil
@@ -19,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from pytorch_msssim import ssim as compute_ssim
 from tqdm import tqdm
 
@@ -41,14 +42,16 @@ CKPT_DIR      = PROJECT_ROOT / "checkpoints"
 CKPT_DIR.mkdir(exist_ok=True)
 
 BATCH_SIZE    = 4
-EPOCHS        = 50
+EPOCHS        = 60
 LR            = 1e-4
+WARMUP_EPOCHS = 5     # linear LR warmup from 1e-6 → LR
+EMA_DECAY     = 0.999 # EMA weight decay (updated per batch)
 CROP_SIZE     = 512
 VAL_FRACTION  = 0.1   # fraction of training data used for validation
 SAVE_EVERY    = 5     # save a checkpoint every N epochs
-L1_WEIGHT     = 0.70
-SSIM_WEIGHT   = 0.15
-FFT_WEIGHT    = 0.15  # weights sum to 1.0
+L1_WEIGHT     = 0.50
+SSIM_WEIGHT   = 0.20
+FFT_WEIGHT    = 0.30  # weights sum to 1.0
 SEED          = 42
 
 
@@ -88,7 +91,7 @@ def fft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 class CombinedLoss(nn.Module):
-    """0.70 × L1  +  0.15 × (1 − SSIM)  +  0.15 × FFT"""
+    """0.50 × L1  +  0.20 × (1 − SSIM)  +  0.30 × FFT"""
 
     def __init__(
         self,
@@ -110,10 +113,44 @@ class CombinedLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Exponential Moving Average
+# ---------------------------------------------------------------------------
+
+class ModelEMA:
+    """
+    Maintains an EMA copy of model weights, updated once per training step.
+
+    shadow_p = decay * shadow_p + (1 - decay) * live_p
+
+    With decay=0.999 and ~100 steps/epoch the EMA window spans ~10 epochs,
+    smoothing out noisy weight updates and typically yielding +0.5–1 dB PSNR
+    on validation compared to the raw training weights.
+
+    BatchNorm running stats (buffers) are copied directly from the live model
+    rather than EMA'd — they are already running averages and double-averaging
+    them would introduce lag.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.model = copy.deepcopy(model)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for ema_p, p in zip(self.model.parameters(), model.parameters()):
+            ema_p.data.mul_(self.decay).add_(p.data, alpha=1.0 - self.decay)
+        for ema_b, b in zip(self.model.buffers(), model.buffers()):
+            ema_b.data.copy_(b.data)
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(model, loader, optimizer, criterion, device, ema=None):
     model.train()
     total_loss = 0.0
 
@@ -125,7 +162,11 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         pred = model(moire)
         loss = criterion(pred, clean)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+
+        if ema is not None:
+            ema.update(model)
 
         total_loss += loss.item()
 
@@ -186,10 +227,29 @@ def main():
     model     = UNet().to(device)
     criterion = CombinedLoss()
     optimizer = Adam(model.parameters(), lr=LR)
-    scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+
+    warmup_sched = LinearLR(
+        optimizer,
+        start_factor=1e-6 / LR,   # epoch 1 LR = 1e-6
+        end_factor=1.0,            # epoch WARMUP_EPOCHS LR = 1e-4
+        total_iters=WARMUP_EPOCHS,
+    )
+    cosine_sched = CosineAnnealingLR(
+        optimizer,
+        T_max=EPOCHS - WARMUP_EPOCHS,
+        eta_min=1e-6,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_sched, cosine_sched],
+        milestones=[WARMUP_EPOCHS],
+    )
+
+    ema = ModelEMA(model, decay=EMA_DECAY)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model : {total_params / 1e6:.2f} M parameters")
+    print(f"EMA   : decay={EMA_DECAY}, warmup={WARMUP_EPOCHS} epochs")
 
     # ----- Training --------------------------------------------------------
     best_psnr      = -float("inf")
@@ -200,8 +260,8 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         t0 = time.time()
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_psnr, val_ssim = validate(model, val_loader, criterion, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device, ema)
+        val_loss, val_psnr, val_ssim = validate(ema.model, val_loader, criterion, device)
 
         scheduler.step()
         elapsed = time.time() - t0
@@ -210,7 +270,7 @@ def main():
             f"Epoch {epoch:03d}/{EPOCHS} | "
             f"Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f} | "
-            f"PSNR: {val_psnr:.2f} dB | "
+            f"PSNR (EMA): {val_psnr:.2f} dB | "
             f"SSIM: {val_ssim:.4f} | "
             f"LR: {scheduler.get_last_lr()[0]:.2e} | "
             f"Time: {elapsed:.1f}s"
@@ -222,6 +282,7 @@ def main():
             torch.save({
                 "epoch":       epoch,
                 "model_state": model.state_dict(),
+                "ema_state":   ema.model.state_dict(),
                 "optim_state": optimizer.state_dict(),
                 "val_psnr":    val_psnr,
             }, ckpt_path)
@@ -233,29 +294,39 @@ def main():
             torch.save({
                 "epoch":       epoch,
                 "model_state": model.state_dict(),
+                "ema_state":   ema.model.state_dict(),
                 "val_psnr":    best_psnr,
             }, best_ckpt_path)
-            print(f"  ★ New best PSNR {best_psnr:.2f} dB — saved best_model.pth")
+            torch.save({
+                "epoch":       epoch,
+                "model_state": ema.model.state_dict(),
+                "val_psnr":    best_psnr,
+            }, CKPT_DIR / "best_model_ema.pth")
+            print(f"  ★ New best EMA PSNR {best_psnr:.2f} dB — saved best_model.pth + best_model_ema.pth")
             kaggle_out = Path("/kaggle/working/best_model_attention.pth")
             if Path("/kaggle").exists():
                 shutil.copy(best_ckpt_path, kaggle_out)
                 print(f"  → Also saved to {kaggle_out}")
 
-    print(f"\nTraining complete. Best validation PSNR: {best_psnr:.2f} dB")
+    print(f"\nTraining complete. Best EMA PSNR: {best_psnr:.2f} dB")
 
     # Auto-save to Kaggle output and generate download link
-    kaggle_out = Path("/kaggle/working/best_model_attention.pth")
+    kaggle_out     = Path("/kaggle/working/best_model_attention.pth")
+    kaggle_ema_out = Path("/kaggle/working/best_model_ema.pth")
     if Path("/kaggle").exists():
-        shutil.copy(CKPT_DIR / "best_model.pth", kaggle_out)
-        print(f"\nModel saved to: {kaggle_out}")
+        shutil.copy(CKPT_DIR / "best_model.pth",     kaggle_out)
+        shutil.copy(CKPT_DIR / "best_model_ema.pth", kaggle_ema_out)
+        print(f"\nModels saved to Kaggle output:")
+        print(f"  {kaggle_out}")
+        print(f"  {kaggle_ema_out}")
 
         try:
             from IPython.display import FileLink, display
-            display(FileLink("/kaggle/working/best_model_attention.pth"))
-            print("Click the link above to download the model.")
+            display(FileLink("/kaggle/working/best_model_ema.pth"))
+            print("Click the link above to download the EMA model.")
         except Exception:
             print("Run this to download:")
-            print("from IPython.display import FileLink; FileLink('/kaggle/working/best_model_attention.pth')")
+            print("from IPython.display import FileLink; FileLink('/kaggle/working/best_model_ema.pth')")
 
 
 if __name__ == "__main__":
