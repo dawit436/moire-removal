@@ -34,7 +34,7 @@ from models.unet import UNet
 
 PROJECT_ROOT  = Path(__file__).parent          # directory of this script
 DATA_DIR      = (
-    Path("/kaggle/input/datasets/dawitesubalew/moire-pattern-dataset2/data")
+    Path("/kaggle/input/datasets/dawitesubalew/moire-clean-dataset3/data")
     if Path("/kaggle").exists()
     else PROJECT_ROOT / "data"
 )

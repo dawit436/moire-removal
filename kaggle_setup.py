@@ -82,12 +82,12 @@ print("\n" + "=" * 60)
 print("STEP 3 — Checking DATA_DIR")
 print("=" * 60)
 
-kaggle_dataset_path = "moire-pattern-dataset2/data"
+kaggle_dataset_path = "moire-clean-dataset3/data"
 train_text = (REPO_DIR / "train.py").read_text(encoding="utf-8")
 
 if kaggle_dataset_path in train_text:
     print("  PASS  [DATA_DIR] — Kaggle dataset path found in train.py")
-    print("         → /kaggle/input/datasets/dawitesubalew/moire-pattern-dataset2/data")
+    print("         → /kaggle/input/datasets/dawitesubalew/moire-clean-dataset3/data")
 else:
     print("  FAIL  [DATA_DIR] — Kaggle dataset path missing from train.py")
     all_passed = False
