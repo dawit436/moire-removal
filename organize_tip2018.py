@@ -4,17 +4,18 @@ organize_tip2018.py — Organize the raw TIP2018 download into training structur
 Usage:
     python organize_tip2018.py
 
-Input:  D:\TIP2018_raw\   (downloaded + extracted from HuggingFace)
+Input:  D:/TIP2018_raw/   (downloaded + extracted from HuggingFace)
 Output:
-    D:\TIP2018\data\train\moire\   0000_moire.png …
-    D:\TIP2018\data\train\clean\   0000_gt.png …
-    D:\TIP2018\data\test\moire\
-    D:\TIP2018\data\test\clean\
+    D:/TIP2018/data/train/moire/   0000_moire.png ...
+    D:/TIP2018/data/train/clean/   0000_gt.png ...
+    D:/TIP2018/data/test/moire/
+    D:/TIP2018/data/test/clean/
 
 Key step: auto-crop the black cross-shaped frame from every image pair.
 Split: 90 % train / 10 % test (seed=42) if no separate test split exists.
 """
 
+import os
 import random
 from pathlib import Path
 
@@ -31,12 +32,24 @@ IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".JPG", ".JPEG", ".PNG"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def is_image(p: Path) -> bool:
-    return p.suffix in IMG_EXTS
+def is_image(p) -> bool:
+    return Path(p).suffix in IMG_EXTS
 
 
 def sorted_images(d: Path):
-    return sorted(f for f in d.iterdir() if f.is_file() and is_image(f))
+    # Use os.scandir so DirEntry.is_file() uses cached type — no per-file stat call
+    result = []
+    try:
+        with os.scandir(d) as it:
+            for entry in it:
+                try:
+                    if entry.is_file() and is_image(entry.name):
+                        result.append(Path(entry.path))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return sorted(result)
 
 
 def auto_crop(moire_img: Image.Image, clean_img: Image.Image):
@@ -75,10 +88,18 @@ def find_pairs_in(base: Path):
     target_names = {"target", "clean", "gt"}
 
     search_dirs = [base]
-    # handle e.g. trainData/trainData/
+    # handle trainData/trainData/ (flat nested)
     nested = base / base.name
     if nested.exists():
         search_dirs.insert(0, nested)
+    # handle trainData/extracted/trainData/ (7-Zip extraction with subfolder)
+    extracted_nested = base / "extracted" / base.name
+    if extracted_nested.exists():
+        search_dirs.insert(0, extracted_nested)
+    # handle trainData/extracted/ directly
+    extracted = base / "extracted"
+    if extracted.exists():
+        search_dirs.insert(0, extracted)
 
     for candidate in search_dirs:
         if not candidate.is_dir():
@@ -130,12 +151,16 @@ def organize_split(split: str, pairs: list, start_idx: int = 0):
         tqdm(pairs, desc=f"  {split}", unit="pair")
     ):
         idx = start_idx + i
+        out_m = moire_out / f"{idx:04d}_moire.png"
+        out_c = clean_out  / f"{idx:04d}_gt.png"
+        if out_m.exists() and out_c.exists():
+            continue  # already processed — resume-safe
         try:
             moire_img = Image.open(m_path).convert("RGB")
             clean_img  = Image.open(c_path).convert("RGB")
             moire_img, clean_img = auto_crop(moire_img, clean_img)
-            moire_img.save(moire_out / f"{idx:04d}_moire.png")
-            clean_img.save(clean_out  / f"{idx:04d}_gt.png")
+            moire_img.save(out_m)
+            clean_img.save(out_c)
         except Exception as exc:
             print(f"  [WARN] Skipping {m_path.name}: {exc}")
 
@@ -155,15 +180,8 @@ def main():
     if not RAW_ROOT.exists():
         raise SystemExit(f"[ERROR] {RAW_ROOT} does not exist. Download + extract first.")
 
-    # Show directory tree (dirs only, max depth 4)
-    print("\nRaw directory tree (dirs only):")
-    for p in sorted(RAW_ROOT.rglob("*")):
-        if p.is_dir():
-            depth = len(p.relative_to(RAW_ROOT).parts)
-            if depth <= 4:
-                print("  " + "  " * depth + p.name + "/")
 
-    print()
+
     train_pairs, test_pairs = discover_pairs()
     print(f"  Discovered {len(train_pairs)} train pairs, {len(test_pairs)} test pairs")
 
