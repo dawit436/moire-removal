@@ -21,8 +21,8 @@ GIT_TOKEN = os.environ.get("GIT_TOKEN", "")
 REPO_DIR = Path(os.environ.get("REPO_DIR", "/kaggle/working/moire_project"))
 
 EPOCHS = os.environ.get("EPOCHS", "30")
-BATCH_SIZE = os.environ.get("BATCH_SIZE", "2")
-ACCUM_STEPS = os.environ.get("ACCUM_STEPS", "4")
+BATCH_SIZE = os.environ.get("BATCH_SIZE", "1")
+ACCUM_STEPS = os.environ.get("ACCUM_STEPS", "8")
 CROP_SIZE = os.environ.get("CROP_SIZE", "512")
 LR = os.environ.get("LR", "5e-5")
 NUM_WORKERS = os.environ.get("NUM_WORKERS", "2")
@@ -34,6 +34,7 @@ USE_AMP = os.environ.get("USE_AMP", "1") != "0"
 SCALE_JITTER = os.environ.get("SCALE_JITTER", "0") == "1"
 INSTALL_REQUIREMENTS = os.environ.get("INSTALL_REQUIREMENTS", "1") != "0"
 PRETRAINED_CKPT = os.environ.get("PRETRAINED_CKPT", "")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 KAGGLE_INPUT = Path("/kaggle/input")
 KAGGLE_WORKING = Path("/kaggle/working")

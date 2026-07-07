@@ -34,8 +34,8 @@ the optimization less destructive and preserve image content better.
 - `train_combined.py` exposes `--l1-weight`, `--ssim-weight`, `--fft-weight`.
 - `train_combined.py` exposes `--scale-jitter`; Kaggle defaults keep it off.
 - `kaggle/run_from_git.py` defaults to a more stable FHDMi fine-tuning setup:
-  - `BATCH_SIZE=2`
-  - `ACCUM_STEPS=4`
+  - `BATCH_SIZE=1`
+  - `ACCUM_STEPS=8`
   - `LR=5e-5`
   - `L1_WEIGHT=0.75`
   - `SSIM_WEIGHT=0.20`
@@ -62,7 +62,7 @@ Run a smoke test first:
 
 ```python
 os.environ["EPOCHS"] = "2"
-os.environ["BATCH_SIZE"] = "2"
+os.environ["BATCH_SIZE"] = "1"
 os.environ["ACCUM_STEPS"] = "1"
 ```
 
@@ -70,8 +70,8 @@ Then run the full setup:
 
 ```python
 os.environ["EPOCHS"] = "30"
-os.environ["BATCH_SIZE"] = "2"
-os.environ["ACCUM_STEPS"] = "4"
+os.environ["BATCH_SIZE"] = "1"
+os.environ["ACCUM_STEPS"] = "8"
 os.environ["CROP_SIZE"] = "512"
 os.environ["LR"] = "5e-5"
 os.environ["L1_WEIGHT"] = "0.75"

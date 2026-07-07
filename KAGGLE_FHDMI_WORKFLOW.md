@@ -158,7 +158,7 @@ Before a long free-GPU run, set smaller values in the Kaggle environment:
 ```python
 import os
 os.environ["EPOCHS"] = "2"
-os.environ["BATCH_SIZE"] = "2"
+os.environ["BATCH_SIZE"] = "1"
 os.environ["ACCUM_STEPS"] = "1"
 os.environ["LR"] = "5e-5"
 os.environ["L1_WEIGHT"] = "0.75"
@@ -174,8 +174,8 @@ Recommended full FHDMi run:
 ```python
 import os
 os.environ["EPOCHS"] = "30"
-os.environ["BATCH_SIZE"] = "2"
-os.environ["ACCUM_STEPS"] = "4"
+os.environ["BATCH_SIZE"] = "1"
+os.environ["ACCUM_STEPS"] = "8"
 os.environ["CROP_SIZE"] = "512"
 os.environ["LR"] = "5e-5"
 os.environ["L1_WEIGHT"] = "0.75"
