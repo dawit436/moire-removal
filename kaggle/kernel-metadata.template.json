@@ -1,0 +1,17 @@
+{
+  "id": "YOUR_KAGGLE_USERNAME/mbcnn-fhdmi-train",
+  "title": "MBCNN FHDMi Training",
+  "code_file": "run_from_git.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [
+    "YOUR_KAGGLE_USERNAME/fhdmi-kaggle"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

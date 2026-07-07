@@ -1,0 +1,10 @@
+{
+  "title": "FHDMi Moire Pairs for MBCNN",
+  "id": "YOUR_KAGGLE_USERNAME/fhdmi-kaggle",
+  "licenses": [
+    {
+      "name": "unknown"
+    }
+  ],
+  "description": "FHDMi paired moire/clean image subset prepared for MBCNN training. Layout: data/train/moire, data/train/clean, data/test/moire, data/test/clean."
+}

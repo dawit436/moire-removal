@@ -31,10 +31,10 @@ class ResBlock(nn.Module):
         pad = kernel_size // 2
         self.block = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size, padding=pad, bias=False),
-            nn.BatchNorm2d(channels),
+            nn.GroupNorm(num_groups=32, num_channels=channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels, channels, kernel_size, padding=pad, bias=False),
-            nn.BatchNorm2d(channels),
+            nn.GroupNorm(num_groups=32, num_channels=channels),
         )
         self.relu = nn.ReLU(inplace=True)
 
@@ -49,7 +49,7 @@ class FrequencyBranch(nn.Module):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Conv2d(in_ch, branch_ch, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(branch_ch),
+            nn.GroupNorm(num_groups=32, num_channels=branch_ch),
             nn.ReLU(inplace=True),
         )
         self.blocks = nn.Sequential(*[ResBlock(branch_ch) for _ in range(n_blocks)])
@@ -138,11 +138,13 @@ class MBCNN(nn.Module):
 
         self.fusion = nn.Sequential(
             nn.Conv2d(fused_ch, branch_ch, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(branch_ch),
+            nn.GroupNorm(num_groups=32, num_channels=branch_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(branch_ch, out_channels, kernel_size=1),
             nn.Sigmoid(),
         )
+        nn.init.zeros_(self.fusion[-2].weight)
+        nn.init.zeros_(self.fusion[-2].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         moire_input = x
