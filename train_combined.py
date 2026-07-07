@@ -439,6 +439,13 @@ def main():
     best_ckpt_path = CKPT_DIR / best_ckpt_name
     summary_path = CKPT_DIR / "training_summary.json"
 
+    if args.resume and isinstance(loaded_ckpt, dict):
+        ckpt_best = loaded_ckpt.get("best_psnr", loaded_ckpt.get("val_psnr"))
+        if ckpt_best is not None:
+            best_psnr = float(ckpt_best)
+            best_epoch = int(loaded_ckpt.get("best_epoch", loaded_ckpt.get("epoch", 0)))
+            print(f"  Resume best baseline: epoch {best_epoch}, PSNR {best_psnr:.2f} dB")
+
     if start_epoch > EPOCHS:
         raise SystemExit(
             f"start_epoch={start_epoch} is greater than --epochs={EPOCHS}. "
@@ -497,7 +504,10 @@ def main():
                 "dataset":     args.dataset,
                 "model_state": model.state_dict(),
                 "ema_state":   ema.model.state_dict(),
+                "optim_state": optimizer.state_dict(),
                 "val_psnr":    best_psnr,
+                "best_psnr":   best_psnr,
+                "best_epoch":  best_epoch,
             }, best_ckpt_path)
             print(f"  ★ New best PSNR {best_psnr:.2f} dB — saved {best_ckpt_name}")
 

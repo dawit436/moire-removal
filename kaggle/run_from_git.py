@@ -34,6 +34,7 @@ USE_AMP = os.environ.get("USE_AMP", "1") != "0"
 SCALE_JITTER = os.environ.get("SCALE_JITTER", "0") == "1"
 INSTALL_REQUIREMENTS = os.environ.get("INSTALL_REQUIREMENTS", "1") != "0"
 PRETRAINED_CKPT = os.environ.get("PRETRAINED_CKPT", "")
+RESUME = os.environ.get("RESUME", "0") == "1"
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 KAGGLE_INPUT = Path("/kaggle/input")
@@ -162,6 +163,10 @@ def auto_pretrained_arg():
     if PRETRAINED_CKPT:
         return ["--pretrained", PRETRAINED_CKPT]
 
+    resume_ckpt = CHECKPOINT_DIR / "best_mbcnn_fhdmi.pth"
+    if RESUME and resume_ckpt.exists():
+        return ["--pretrained", str(resume_ckpt)]
+
     checkpoints = sorted(KAGGLE_INPUT.rglob("*.pth"))
     if len(checkpoints) == 1:
         return ["--pretrained", str(checkpoints[0])]
@@ -213,6 +218,8 @@ def main():
         SAVE_EVERY,
     ]
     cmd.extend(auto_pretrained_arg())
+    if RESUME:
+        cmd.append("--resume")
     if USE_AMP:
         cmd.append("--amp")
     if SCALE_JITTER:
