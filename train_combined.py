@@ -184,9 +184,11 @@ def train_one_epoch(
                 if not torch.isfinite(grad_norm):
                     optimizer.zero_grad(set_to_none=True)
                     scaler.update()
-                    raise RuntimeError(
-                        f"Non-finite gradient norm at step {step}: {grad_norm.item()}"
+                    print(
+                        f"  [WARN] Non-finite gradient norm at step {step}: "
+                        f"{grad_norm.item()} - skipped optimizer step"
                     )
+                    continue
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -368,7 +370,7 @@ def load_datasets(name: str):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     global FHDMI_DATA, TIP2018_DATA, CKPT_DIR
-    global BATCH_SIZE, EPOCHS, LR, CROP_SIZE, VAL_FRACTION, SAVE_EVERY
+    global BATCH_SIZE, EPOCHS, LR, WARMUP_EPOCHS, CROP_SIZE, VAL_FRACTION, SAVE_EVERY
     global NUM_WORKERS, ACCUM_STEPS, SCALE_JITTER, HARD_CROP_CANDIDATES
     global L1_WEIGHT, SSIM_WEIGHT, FFT_WEIGHT
 
@@ -398,6 +400,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--crop-size", type=int, default=CROP_SIZE)
     parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--warmup-epochs", type=int, default=WARMUP_EPOCHS)
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--accum-steps", type=int, default=ACCUM_STEPS)
     parser.add_argument("--save-every", type=int, default=SAVE_EVERY)
@@ -420,6 +423,7 @@ def main():
     BATCH_SIZE = args.batch_size
     EPOCHS = args.epochs
     LR = args.lr
+    WARMUP_EPOCHS = max(1, args.warmup_epochs)
     CROP_SIZE = args.crop_size
     VAL_FRACTION = args.val_fraction
     SAVE_EVERY = args.save_every

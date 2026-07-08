@@ -24,15 +24,16 @@ EPOCHS = os.environ.get("EPOCHS", "12")
 BATCH_SIZE = os.environ.get("BATCH_SIZE", "1")
 ACCUM_STEPS = os.environ.get("ACCUM_STEPS", "8")
 CROP_SIZE = os.environ.get("CROP_SIZE", "512")
-LR = os.environ.get("LR", "2e-5")
+LR = os.environ.get("LR", "1e-5")
+WARMUP_EPOCHS = os.environ.get("WARMUP_EPOCHS", "2")
 NUM_WORKERS = os.environ.get("NUM_WORKERS", "2")
 L1_WEIGHT = os.environ.get("L1_WEIGHT", "0.75")
 SSIM_WEIGHT = os.environ.get("SSIM_WEIGHT", "0.20")
-FFT_WEIGHT = os.environ.get("FFT_WEIGHT", "0.10")
+FFT_WEIGHT = os.environ.get("FFT_WEIGHT", "0.05")
 SAVE_EVERY = os.environ.get("SAVE_EVERY", "5")
 USE_AMP = os.environ.get("USE_AMP", "1") != "0"
 SCALE_JITTER = os.environ.get("SCALE_JITTER", "0") == "1"
-HARD_CROP_CANDIDATES = os.environ.get("HARD_CROP_CANDIDATES", "4")
+HARD_CROP_CANDIDATES = os.environ.get("HARD_CROP_CANDIDATES", "3")
 INSTALL_REQUIREMENTS = os.environ.get("INSTALL_REQUIREMENTS", "1") != "0"
 PRETRAINED_CKPT = os.environ.get("PRETRAINED_CKPT", "")
 RESUME = os.environ.get("RESUME", "0") == "1"
@@ -208,6 +209,8 @@ def main():
         CROP_SIZE,
         "--lr",
         LR,
+        "--warmup-epochs",
+        WARMUP_EPOCHS,
         "--l1-weight",
         L1_WEIGHT,
         "--ssim-weight",
