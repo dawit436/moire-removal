@@ -28,8 +28,10 @@ import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader, random_split
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+import torchvision.transforms.functional as TF
 from pytorch_msssim import ssim as compute_ssim
 from tqdm import tqdm
+from PIL import Image, ImageDraw
 
 from dataset import MoireDataset
 from models.mbcnn import MBCNN
@@ -62,6 +64,7 @@ SAVE_EVERY    = 10
 NUM_WORKERS   = 2
 ACCUM_STEPS   = 1
 SCALE_JITTER  = False
+HARD_CROP_CANDIDATES = 1
 L1_WEIGHT     = 0.50
 SSIM_WEIGHT   = 0.20
 FFT_WEIGHT    = 0.30
@@ -207,6 +210,7 @@ def train_one_epoch(
 def validate(model, loader, criterion, device):
     model.eval()
     total_loss = total_psnr = total_ssim = 0.0
+    total_input_psnr = total_input_ssim = 0.0
     for batch in tqdm(loader, desc="  Val  ", leave=False):
         moire = batch["moire"].to(device, non_blocking=True)
         clean = batch["clean"].to(device, non_blocking=True)
@@ -214,8 +218,68 @@ def validate(model, loader, criterion, device):
         total_loss += criterion(pred, clean).item()
         total_psnr += batch_psnr(pred.cpu(), clean.cpu())
         total_ssim += batch_ssim(pred.cpu(), clean.cpu())
+        total_input_psnr += batch_psnr(moire.cpu(), clean.cpu())
+        total_input_ssim += batch_ssim(moire.cpu(), clean.cpu())
     n = len(loader)
-    return total_loss / n, total_psnr / n, total_ssim / n
+    return (
+        total_loss / n,
+        total_psnr / n,
+        total_ssim / n,
+        total_input_psnr / n,
+        total_input_ssim / n,
+    )
+
+
+def _label_image(image: Image.Image, label: str) -> Image.Image:
+    out = image.copy()
+    draw = ImageDraw.Draw(out)
+    draw.rectangle((0, 0, out.width, 26), fill=(0, 0, 0))
+    draw.text((8, 6), label, fill=(255, 255, 255))
+    return out
+
+
+@torch.no_grad()
+def save_validation_preview(model, loader, device, out_path: Path, max_items: int = 3):
+    model.eval()
+    rows = []
+    for batch in loader:
+        moire = batch["moire"].to(device, non_blocking=True)
+        clean = batch["clean"].to(device, non_blocking=True)
+        pred = model(moire).clamp(0, 1).cpu()
+
+        for i in range(moire.shape[0]):
+            panels = [
+                ("input", TF.to_pil_image(moire[i].cpu().clamp(0, 1))),
+                ("output", TF.to_pil_image(pred[i])),
+                ("gt", TF.to_pil_image(clean[i].cpu().clamp(0, 1))),
+            ]
+            labeled = [_label_image(img, label) for label, img in panels]
+            row = Image.new(
+                "RGB",
+                (sum(img.width for img in labeled), max(img.height for img in labeled)),
+                color=(245, 245, 245),
+            )
+            x = 0
+            for img in labeled:
+                row.paste(img, (x, 0))
+                x += img.width
+            rows.append(row)
+            if len(rows) >= max_items:
+                break
+        if len(rows) >= max_items:
+            break
+
+    if not rows:
+        return
+
+    grid = Image.new("RGB", (max(row.width for row in rows), sum(row.height for row in rows)))
+    y = 0
+    for row in rows:
+        grid.paste(row, (0, y))
+        y += row.height
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    grid.save(out_path, quality=95)
 
 
 # ── Dataset loading ───────────────────────────────────────────────────────────
@@ -236,6 +300,7 @@ def _single_dataset_train_val(root: Path, label: str):
         split="train",
         crop_size=CROP_SIZE,
         scale_jitter=SCALE_JITTER,
+        hard_crop_candidates=HARD_CROP_CANDIDATES,
     )
     print(f"  {label:<7} train: {len(train_ds):,} samples")
 
@@ -304,7 +369,7 @@ def load_datasets(name: str):
 def main():
     global FHDMI_DATA, TIP2018_DATA, CKPT_DIR
     global BATCH_SIZE, EPOCHS, LR, CROP_SIZE, VAL_FRACTION, SAVE_EVERY
-    global NUM_WORKERS, ACCUM_STEPS, SCALE_JITTER
+    global NUM_WORKERS, ACCUM_STEPS, SCALE_JITTER, HARD_CROP_CANDIDATES
     global L1_WEIGHT, SSIM_WEIGHT, FFT_WEIGHT
 
     parser = argparse.ArgumentParser()
@@ -338,6 +403,7 @@ def main():
     parser.add_argument("--save-every", type=int, default=SAVE_EVERY)
     parser.add_argument("--val-fraction", type=float, default=VAL_FRACTION)
     parser.add_argument("--scale-jitter", action="store_true", default=SCALE_JITTER)
+    parser.add_argument("--hard-crop-candidates", type=int, default=HARD_CROP_CANDIDATES)
     parser.add_argument("--l1-weight", type=float, default=L1_WEIGHT)
     parser.add_argument("--ssim-weight", type=float, default=SSIM_WEIGHT)
     parser.add_argument("--fft-weight", type=float, default=FFT_WEIGHT)
@@ -360,6 +426,7 @@ def main():
     NUM_WORKERS = args.num_workers
     ACCUM_STEPS = max(1, args.accum_steps)
     SCALE_JITTER = args.scale_jitter
+    HARD_CROP_CANDIDATES = max(1, args.hard_crop_candidates)
     L1_WEIGHT = args.l1_weight
     SSIM_WEIGHT = args.ssim_weight
     FFT_WEIGHT = args.fft_weight
@@ -473,7 +540,10 @@ def main():
 
     print(f"LR      : {LR}  (warmup {WARMUP_EPOCHS} epochs → cosine decay to 1e-6)")
     print(f"Batch   : {BATCH_SIZE}  |  Accum: {ACCUM_STEPS}  |  Crop: {CROP_SIZE}  |  Epochs: {EPOCHS}")
-    print(f"Workers : {NUM_WORKERS}  |  AMP: {use_amp}  |  Scale jitter: {SCALE_JITTER}")
+    print(
+        f"Workers : {NUM_WORKERS}  |  AMP: {use_amp}  |  "
+        f"Scale jitter: {SCALE_JITTER}  |  Hard crops: {HARD_CROP_CANDIDATES}"
+    )
     print(f"Output  : {CKPT_DIR}")
     print(f"EMA     : decay={EMA_DECAY}  |  Grad-clip: max_norm=1.0")
     print(f"Loss    : {L1_WEIGHT}×L1 + {SSIM_WEIGHT}×(1-SSIM) + {FFT_WEIGHT}×FFT")
@@ -487,7 +557,13 @@ def main():
     last_ckpt_path = CKPT_DIR / last_ckpt_name
     summary_path = CKPT_DIR / "training_summary.json"
 
-    def checkpoint_payload(epoch: int, val_psnr: float, val_ssim: float):
+    def checkpoint_payload(
+        epoch: int,
+        val_psnr: float,
+        val_ssim: float,
+        input_psnr: float,
+        input_ssim: float,
+    ):
         payload = {
             "epoch":           epoch,
             "dataset":         args.dataset,
@@ -497,6 +573,9 @@ def main():
             "scheduler_state": scheduler.state_dict(),
             "val_psnr":        val_psnr,
             "val_ssim":        val_ssim,
+            "input_psnr":      input_psnr,
+            "input_ssim":      input_ssim,
+            "delta_psnr":      val_psnr - input_psnr,
             "best_psnr":       best_psnr,
             "best_epoch":      best_epoch,
         }
@@ -533,9 +612,10 @@ def main():
             use_amp=use_amp,
             accum_steps=ACCUM_STEPS,
         )
-        val_loss, val_psnr, val_ssim = validate(
+        val_loss, val_psnr, val_ssim, input_psnr, input_ssim = validate(
             ema.model, val_loader, criterion, device
         )
+        delta_psnr = val_psnr - input_psnr
         scheduler.step()
         elapsed = time.time() - t0
 
@@ -545,6 +625,8 @@ def main():
             f"Val: {val_loss:.4f} | "
             f"PSNR: {val_psnr:.2f} dB | "
             f"SSIM: {val_ssim:.4f} | "
+            f"Input PSNR: {input_psnr:.2f} dB | "
+            f"Delta: {delta_psnr:+.2f} dB | "
             f"LR: {scheduler.get_last_lr()[0]:.2e} | "
             f"Time: {elapsed:.0f}s"
         )
@@ -556,12 +638,23 @@ def main():
 
         if epoch % SAVE_EVERY == 0:
             ckpt_path = CKPT_DIR / f"mbcnn_{args.dataset}_epoch_{epoch:03d}.pth"
-            torch.save(checkpoint_payload(epoch, val_psnr, val_ssim), ckpt_path)
+            torch.save(
+                checkpoint_payload(epoch, val_psnr, val_ssim, input_psnr, input_ssim),
+                ckpt_path,
+            )
             print(f"  → Checkpoint: {ckpt_path.name}")
 
         if is_new_best:
-            torch.save(checkpoint_payload(epoch, best_psnr, val_ssim), best_ckpt_path)
+            torch.save(
+                checkpoint_payload(epoch, best_psnr, val_ssim, input_psnr, input_ssim),
+                best_ckpt_path,
+            )
             print(f"  ★ New best PSNR {best_psnr:.2f} dB — saved {best_ckpt_name}")
+
+            preview_name = f"val_preview_{args.dataset}_epoch_{epoch:03d}.jpg"
+            preview_path = CKPT_DIR / preview_name
+            save_validation_preview(ema.model, val_loader, device, preview_path)
+            print(f"  → Preview: {preview_name}")
 
             summary_path.write_text(json.dumps({
                 "dataset": args.dataset,
@@ -569,12 +662,16 @@ def main():
                 "best_epoch": epoch,
                 "best_psnr": best_psnr,
                 "best_ssim": val_ssim,
+                "input_psnr": input_psnr,
+                "input_ssim": input_ssim,
+                "delta_psnr": delta_psnr,
                 "best_checkpoint": str(best_ckpt_path),
                 "epochs_requested": EPOCHS,
                 "batch_size": BATCH_SIZE,
                 "accum_steps": ACCUM_STEPS,
                 "crop_size": CROP_SIZE,
                 "scale_jitter": SCALE_JITTER,
+                "hard_crop_candidates": HARD_CROP_CANDIDATES,
                 "learning_rate": LR,
                 "l1_weight": L1_WEIGHT,
                 "ssim_weight": SSIM_WEIGHT,
@@ -586,8 +683,12 @@ def main():
                 kaggle_working = Path("/kaggle/working")
                 shutil.copy(best_ckpt_path, kaggle_working / best_ckpt_name)
                 shutil.copy(summary_path, kaggle_working / summary_path.name)
+                shutil.copy(preview_path, kaggle_working / preview_name)
 
-        torch.save(checkpoint_payload(epoch, val_psnr, val_ssim), last_ckpt_path)
+        torch.save(
+            checkpoint_payload(epoch, val_psnr, val_ssim, input_psnr, input_ssim),
+            last_ckpt_path,
+        )
         if Path("/kaggle").exists():
             shutil.copy(last_ckpt_path, Path("/kaggle/working") / last_ckpt_name)
 
@@ -605,6 +706,7 @@ def main():
         "accum_steps": ACCUM_STEPS,
         "crop_size": CROP_SIZE,
         "scale_jitter": SCALE_JITTER,
+        "hard_crop_candidates": HARD_CROP_CANDIDATES,
         "learning_rate": LR,
         "l1_weight": L1_WEIGHT,
         "ssim_weight": SSIM_WEIGHT,

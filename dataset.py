@@ -33,6 +33,7 @@ class MoireDataset(Dataset):
         split: str = "train",
         crop_size: int = 512,
         scale_jitter: bool = True,
+        hard_crop_candidates: int = 1,
     ):
         """
         Args:
@@ -44,6 +45,7 @@ class MoireDataset(Dataset):
         self.split = split
         self.crop_size = crop_size
         self.scale_jitter = scale_jitter
+        self.hard_crop_candidates = max(1, int(hard_crop_candidates))
 
         moire_dir = Path(root_dir) / split / "moire"
         clean_dir = Path(root_dir) / split / "clean"
@@ -102,8 +104,12 @@ class MoireDataset(Dataset):
                 else self.crop_size
             )
 
-            # 2. Random crop (same region for both images)
-            i, j, h, w = self._random_crop_params(moire_img, crop_size)
+            # 2. Crop the same region for both images. With multiple candidates,
+            # prefer patches where moire and clean differ more.
+            if self.hard_crop_candidates > 1:
+                i, j, h, w = self._hard_crop_params(moire_img, clean_img, crop_size)
+            else:
+                i, j, h, w = self._random_crop_params(moire_img, crop_size)
             moire_img = TF.crop(moire_img, i, j, h, w)
             clean_img = TF.crop(clean_img, i, j, h, w)
 
@@ -151,3 +157,22 @@ class MoireDataset(Dataset):
         top  = torch.randint(0, h - th + 1, (1,)).item()
         left = torch.randint(0, w - tw + 1, (1,)).item()
         return top, left, th, tw
+
+    def _hard_crop_params(self, moire_img, clean_img, crop_size: int):
+        best_params = None
+        best_score = -1.0
+
+        for _ in range(self.hard_crop_candidates):
+            params = self._random_crop_params(moire_img, crop_size)
+            top, left, h, w = params
+            moire_crop = TF.crop(moire_img, top, left, h, w).convert("L")
+            clean_crop = TF.crop(clean_img, top, left, h, w).convert("L")
+
+            moire_arr = np.asarray(moire_crop, dtype=np.float32)
+            clean_arr = np.asarray(clean_crop, dtype=np.float32)
+            score = float(np.mean(np.abs(moire_arr - clean_arr)))
+            if score > best_score:
+                best_score = score
+                best_params = params
+
+        return best_params
