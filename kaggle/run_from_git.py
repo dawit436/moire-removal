@@ -35,6 +35,7 @@ SCALE_JITTER = os.environ.get("SCALE_JITTER", "0") == "1"
 INSTALL_REQUIREMENTS = os.environ.get("INSTALL_REQUIREMENTS", "1") != "0"
 PRETRAINED_CKPT = os.environ.get("PRETRAINED_CKPT", "")
 RESUME = os.environ.get("RESUME", "0") == "1"
+RESET_OPTIMIZER = os.environ.get("RESET_OPTIMIZER", "0") == "1"
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 KAGGLE_INPUT = Path("/kaggle/input")
@@ -220,6 +221,8 @@ def main():
     cmd.extend(auto_pretrained_arg())
     if RESUME:
         cmd.append("--resume")
+    if RESET_OPTIMIZER:
+        cmd.append("--reset-optimizer")
     if USE_AMP:
         cmd.append("--amp")
     if SCALE_JITTER:

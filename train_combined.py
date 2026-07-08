@@ -160,8 +160,14 @@ def train_one_epoch(
 
         with autocast_context(device, use_amp):
             pred = model(moire)
-            loss = criterion(pred, clean)
-            backward_loss = loss / accum_steps
+
+        # Keep FFT/SSIM loss in float32; mixed precision here can become unstable.
+        loss = criterion(pred.float(), clean.float())
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"Non-finite training loss at step {step}: {loss.item()}"
+            )
+        backward_loss = loss / accum_steps
 
         if scaler is not None:
             scaler.scale(backward_loss).backward()
@@ -171,11 +177,22 @@ def train_one_epoch(
         if step % accum_steps == 0 or step == len(loader):
             if scaler is not None:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at step {step}: {grad_norm.item()}"
+                    )
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad(set_to_none=True)
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at step {step}: {grad_norm.item()}"
+                    )
                 optimizer.step()
 
             optimizer.zero_grad(set_to_none=True)
@@ -304,6 +321,11 @@ def main():
         help="Path to weights/checkpoint for fine-tuning. Use 'none' to disable auto-load.",
     )
     parser.add_argument("--resume", action="store_true", help="Resume epoch and optimizer state from --pretrained.")
+    parser.add_argument(
+        "--reset-optimizer",
+        action="store_true",
+        help="When resuming/fine-tuning, keep weights but start with a fresh optimizer/scheduler.",
+    )
     parser.add_argument("--fhdmi-data", type=Path, default=None, help="FHDMi data root containing train/ and test/.")
     parser.add_argument("--tip2018-data", type=Path, default=None, help="TIP2018 data root containing train/ and test/.")
     parser.add_argument("--out-dir", type=Path, default=None, help="Checkpoint/output directory.")
@@ -386,7 +408,9 @@ def main():
     if pretrained_path is not None and pretrained_path.exists():
         print(f"\nLoading pretrained weights from {pretrained_path.name} ...")
         loaded_ckpt = torch.load(pretrained_path, map_location=device)
-        if isinstance(loaded_ckpt, dict) and "ema_state" in loaded_ckpt:
+        if args.resume and isinstance(loaded_ckpt, dict) and "model_state" in loaded_ckpt:
+            state_dict = loaded_ckpt["model_state"]
+        elif isinstance(loaded_ckpt, dict) and "ema_state" in loaded_ckpt:
             state_dict = loaded_ckpt["ema_state"]
         elif isinstance(loaded_ckpt, dict) and "model_state" in loaded_ckpt:
             state_dict = loaded_ckpt["model_state"]
@@ -410,8 +434,8 @@ def main():
     criterion = CombinedLoss()
     optimizer = Adam(model.parameters(), lr=LR)
     ema       = ModelEMA(model, decay=EMA_DECAY)
-    if args.resume and isinstance(loaded_ckpt, dict) and "optim_state" in loaded_ckpt:
-        optimizer.load_state_dict(loaded_ckpt["optim_state"])
+    if args.resume and isinstance(loaded_ckpt, dict) and "ema_state" in loaded_ckpt:
+        ema.model.load_state_dict(loaded_ckpt["ema_state"], strict=False)
 
     warmup_sched = LinearLR(
         optimizer, start_factor=1e-6 / LR, end_factor=1.0, total_iters=WARMUP_EPOCHS
@@ -425,6 +449,28 @@ def main():
     use_amp = args.amp and device.type == "cuda"
     scaler = build_grad_scaler(use_amp)
 
+    if args.resume and isinstance(loaded_ckpt, dict):
+        can_exact_resume = (
+            "optim_state" in loaded_ckpt
+            and "scheduler_state" in loaded_ckpt
+            and not args.reset_optimizer
+        )
+        if can_exact_resume:
+            optimizer.load_state_dict(loaded_ckpt["optim_state"])
+            scheduler.load_state_dict(loaded_ckpt["scheduler_state"])
+            if scaler is not None and "scaler_state" in loaded_ckpt:
+                scaler.load_state_dict(loaded_ckpt["scaler_state"])
+            print("  Exact resume: optimizer, scheduler and scaler state restored.")
+        elif args.reset_optimizer:
+            print("  Resume weights only: optimizer/scheduler reset by request.")
+        elif "optim_state" in loaded_ckpt:
+            print(
+                "  Resume weights only: optimizer state exists but scheduler state is missing; "
+                "resetting optimizer/scheduler to avoid LR mismatch."
+            )
+        else:
+            print("  Resume weights only: checkpoint has no optimizer/scheduler state.")
+
     print(f"LR      : {LR}  (warmup {WARMUP_EPOCHS} epochs → cosine decay to 1e-6)")
     print(f"Batch   : {BATCH_SIZE}  |  Accum: {ACCUM_STEPS}  |  Crop: {CROP_SIZE}  |  Epochs: {EPOCHS}")
     print(f"Workers : {NUM_WORKERS}  |  AMP: {use_amp}  |  Scale jitter: {SCALE_JITTER}")
@@ -437,7 +483,26 @@ def main():
     best_psnr      = -float("inf")
     best_ckpt_name = f"best_mbcnn_{args.dataset}.pth"
     best_ckpt_path = CKPT_DIR / best_ckpt_name
+    last_ckpt_name = f"last_mbcnn_{args.dataset}.pth"
+    last_ckpt_path = CKPT_DIR / last_ckpt_name
     summary_path = CKPT_DIR / "training_summary.json"
+
+    def checkpoint_payload(epoch: int, val_psnr: float, val_ssim: float):
+        payload = {
+            "epoch":           epoch,
+            "dataset":         args.dataset,
+            "model_state":     model.state_dict(),
+            "ema_state":       ema.model.state_dict(),
+            "optim_state":     optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "val_psnr":        val_psnr,
+            "val_ssim":        val_ssim,
+            "best_psnr":       best_psnr,
+            "best_epoch":      best_epoch,
+        }
+        if scaler is not None:
+            payload["scaler_state"] = scaler.state_dict()
+        return payload
 
     if args.resume and isinstance(loaded_ckpt, dict):
         ckpt_best = loaded_ckpt.get("best_psnr", loaded_ckpt.get("val_psnr"))
@@ -484,31 +549,18 @@ def main():
             f"Time: {elapsed:.0f}s"
         )
 
-        if epoch % SAVE_EVERY == 0:
-            ckpt_path = CKPT_DIR / f"mbcnn_{args.dataset}_epoch_{epoch:03d}.pth"
-            torch.save({
-                "epoch":       epoch,
-                "dataset":     args.dataset,
-                "model_state": model.state_dict(),
-                "ema_state":   ema.model.state_dict(),
-                "optim_state": optimizer.state_dict(),
-                "val_psnr":    val_psnr,
-            }, ckpt_path)
-            print(f"  → Checkpoint: {ckpt_path.name}")
-
-        if val_psnr > best_psnr:
+        is_new_best = val_psnr > best_psnr
+        if is_new_best:
             best_epoch = epoch
             best_psnr = val_psnr
-            torch.save({
-                "epoch":       epoch,
-                "dataset":     args.dataset,
-                "model_state": model.state_dict(),
-                "ema_state":   ema.model.state_dict(),
-                "optim_state": optimizer.state_dict(),
-                "val_psnr":    best_psnr,
-                "best_psnr":   best_psnr,
-                "best_epoch":  best_epoch,
-            }, best_ckpt_path)
+
+        if epoch % SAVE_EVERY == 0:
+            ckpt_path = CKPT_DIR / f"mbcnn_{args.dataset}_epoch_{epoch:03d}.pth"
+            torch.save(checkpoint_payload(epoch, val_psnr, val_ssim), ckpt_path)
+            print(f"  → Checkpoint: {ckpt_path.name}")
+
+        if is_new_best:
+            torch.save(checkpoint_payload(epoch, best_psnr, val_ssim), best_ckpt_path)
             print(f"  ★ New best PSNR {best_psnr:.2f} dB — saved {best_ckpt_name}")
 
             summary_path.write_text(json.dumps({
@@ -534,6 +586,10 @@ def main():
                 kaggle_working = Path("/kaggle/working")
                 shutil.copy(best_ckpt_path, kaggle_working / best_ckpt_name)
                 shutil.copy(summary_path, kaggle_working / summary_path.name)
+
+        torch.save(checkpoint_payload(epoch, val_psnr, val_ssim), last_ckpt_path)
+        if Path("/kaggle").exists():
+            shutil.copy(last_ckpt_path, Path("/kaggle/working") / last_ckpt_name)
 
     print(f"\nTraining complete. Best EMA PSNR: {best_psnr:.2f} dB")
     print(f"Best model: {best_ckpt_path}")
