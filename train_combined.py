@@ -594,6 +594,26 @@ def main():
             best_epoch = int(loaded_ckpt.get("best_epoch", loaded_ckpt.get("epoch", 0)))
             print(f"  Resume best baseline: epoch {best_epoch}, PSNR {best_psnr:.2f} dB")
 
+            if not best_ckpt_path.exists():
+                baseline_epoch = int(loaded_ckpt.get("epoch", max(0, start_epoch - 1)))
+                baseline_val_psnr = float(loaded_ckpt.get("val_psnr", best_psnr))
+                baseline_val_ssim = float(loaded_ckpt.get("val_ssim", float("nan")))
+                baseline_input_psnr = float(loaded_ckpt.get("input_psnr", float("nan")))
+                baseline_input_ssim = float(loaded_ckpt.get("input_ssim", float("nan")))
+                torch.save(
+                    checkpoint_payload(
+                        baseline_epoch,
+                        baseline_val_psnr,
+                        baseline_val_ssim,
+                        baseline_input_psnr,
+                        baseline_input_ssim,
+                    ),
+                    best_ckpt_path,
+                )
+                print(f"  Resume baseline saved as {best_ckpt_name}")
+                if Path("/kaggle").exists():
+                    shutil.copy(best_ckpt_path, Path("/kaggle/working") / best_ckpt_name)
+
     if start_epoch > EPOCHS:
         raise SystemExit(
             f"start_epoch={start_epoch} is greater than --epochs={EPOCHS}. "
