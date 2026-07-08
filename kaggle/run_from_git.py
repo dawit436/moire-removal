@@ -29,7 +29,8 @@ WARMUP_EPOCHS = os.environ.get("WARMUP_EPOCHS", "2")
 NUM_WORKERS = os.environ.get("NUM_WORKERS", "2")
 L1_WEIGHT = os.environ.get("L1_WEIGHT", "0.75")
 SSIM_WEIGHT = os.environ.get("SSIM_WEIGHT", "0.20")
-FFT_WEIGHT = os.environ.get("FFT_WEIGHT", "0.05")
+FFT_WEIGHT = os.environ.get("FFT_WEIGHT", "0.00")
+ASL_WEIGHT = os.environ.get("ASL_WEIGHT", "0.25")
 SAVE_EVERY = os.environ.get("SAVE_EVERY", "5")
 USE_AMP = os.environ.get("USE_AMP", "1") != "0"
 SCALE_JITTER = os.environ.get("SCALE_JITTER", "0") == "1"
@@ -217,6 +218,8 @@ def main():
         SSIM_WEIGHT,
         "--fft-weight",
         FFT_WEIGHT,
+        "--asl-weight",
+        ASL_WEIGHT,
         "--num-workers",
         NUM_WORKERS,
         "--save-every",

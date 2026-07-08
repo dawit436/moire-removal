@@ -165,12 +165,31 @@ class MoireDataset(Dataset):
         for _ in range(self.hard_crop_candidates):
             params = self._random_crop_params(moire_img, crop_size)
             top, left, h, w = params
-            moire_crop = TF.crop(moire_img, top, left, h, w).convert("L")
-            clean_crop = TF.crop(clean_img, top, left, h, w).convert("L")
+            moire_crop = TF.crop(moire_img, top, left, h, w).convert("RGB")
+            clean_crop = TF.crop(clean_img, top, left, h, w).convert("RGB")
 
-            moire_arr = np.asarray(moire_crop, dtype=np.float32)
-            clean_arr = np.asarray(clean_crop, dtype=np.float32)
-            score = float(np.mean(np.abs(moire_arr - clean_arr)))
+            moire_arr = np.asarray(moire_crop, dtype=np.float32) / 255.0
+            clean_arr = np.asarray(clean_crop, dtype=np.float32) / 255.0
+            rgb_diff = np.abs(moire_arr - clean_arr)
+            color_score = float(rgb_diff.mean())
+
+            moire_y = (
+                0.299 * moire_arr[..., 0]
+                + 0.587 * moire_arr[..., 1]
+                + 0.114 * moire_arr[..., 2]
+            )
+            clean_y = (
+                0.299 * clean_arr[..., 0]
+                + 0.587 * clean_arr[..., 1]
+                + 0.114 * clean_arr[..., 2]
+            )
+            my_dy, my_dx = np.gradient(moire_y)
+            cy_dy, cy_dx = np.gradient(clean_y)
+            freq_score = float(
+                np.mean(np.abs(my_dx - cy_dx)) + np.mean(np.abs(my_dy - cy_dy))
+            )
+
+            score = color_score + 0.25 * freq_score
             if score > best_score:
                 best_score = score
                 best_params = params

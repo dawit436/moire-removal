@@ -68,6 +68,7 @@ HARD_CROP_CANDIDATES = 1
 L1_WEIGHT     = 0.50
 SSIM_WEIGHT   = 0.20
 FFT_WEIGHT    = 0.30
+ASL_WEIGHT    = 0.00
 SEED          = 42
 
 
@@ -92,8 +93,28 @@ def fft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(pred_mag, target_mag)
 
 
+def advanced_sobel_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Four-direction Sobel L1 loss, inspired by MBCNN's ASL."""
+    pred = pred.float()
+    target = target.float()
+    kernels = torch.tensor(
+        [
+            [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
+            [[1, 2, 1], [0, 0, 0], [-1, -2, -1]],
+            [[0, 1, 2], [-1, 0, 1], [-2, -1, 0]],
+            [[2, 1, 0], [1, 0, -1], [0, -1, -2]],
+        ],
+        dtype=pred.dtype,
+        device=pred.device,
+    ).view(4, 1, 3, 3) / 4.0
+    kernels = kernels.repeat(pred.shape[1], 1, 1, 1)
+    pred_edges = F.conv2d(pred, kernels, padding=1, groups=pred.shape[1])
+    target_edges = F.conv2d(target, kernels, padding=1, groups=target.shape[1])
+    return F.l1_loss(pred_edges, target_edges)
+
+
 class CombinedLoss(nn.Module):
-    """0.50 × L1  +  0.20 × (1 − SSIM)  +  0.30 × FFT-L1"""
+    """Weighted image-restoration loss with optional FFT and Advanced Sobel terms."""
 
     def __init__(self):
         super().__init__()
@@ -102,8 +123,12 @@ class CombinedLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         l1   = self.l1(pred, target)
         ssim = 1.0 - compute_ssim(pred, target, data_range=1.0, size_average=True)
-        fft  = fft_loss(pred, target)
-        return L1_WEIGHT * l1 + SSIM_WEIGHT * ssim + FFT_WEIGHT * fft
+        loss = L1_WEIGHT * l1 + SSIM_WEIGHT * ssim
+        if FFT_WEIGHT > 0:
+            loss = loss + FFT_WEIGHT * fft_loss(pred, target)
+        if ASL_WEIGHT > 0:
+            loss = loss + ASL_WEIGHT * advanced_sobel_loss(pred, target)
+        return loss
 
 
 def autocast_context(device: torch.device, enabled: bool):
@@ -372,7 +397,7 @@ def main():
     global FHDMI_DATA, TIP2018_DATA, CKPT_DIR
     global BATCH_SIZE, EPOCHS, LR, WARMUP_EPOCHS, CROP_SIZE, VAL_FRACTION, SAVE_EVERY
     global NUM_WORKERS, ACCUM_STEPS, SCALE_JITTER, HARD_CROP_CANDIDATES
-    global L1_WEIGHT, SSIM_WEIGHT, FFT_WEIGHT
+    global L1_WEIGHT, SSIM_WEIGHT, FFT_WEIGHT, ASL_WEIGHT
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -410,6 +435,7 @@ def main():
     parser.add_argument("--l1-weight", type=float, default=L1_WEIGHT)
     parser.add_argument("--ssim-weight", type=float, default=SSIM_WEIGHT)
     parser.add_argument("--fft-weight", type=float, default=FFT_WEIGHT)
+    parser.add_argument("--asl-weight", type=float, default=ASL_WEIGHT)
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA.")
     args = parser.parse_args()
 
@@ -434,6 +460,7 @@ def main():
     L1_WEIGHT = args.l1_weight
     SSIM_WEIGHT = args.ssim_weight
     FFT_WEIGHT = args.fft_weight
+    ASL_WEIGHT = args.asl_weight
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(SEED)
@@ -550,7 +577,10 @@ def main():
     )
     print(f"Output  : {CKPT_DIR}")
     print(f"EMA     : decay={EMA_DECAY}  |  Grad-clip: max_norm=1.0")
-    print(f"Loss    : {L1_WEIGHT}×L1 + {SSIM_WEIGHT}×(1-SSIM) + {FFT_WEIGHT}×FFT")
+    print(
+        f"Loss    : {L1_WEIGHT}×L1 + {SSIM_WEIGHT}×(1-SSIM) + "
+        f"{FFT_WEIGHT}×FFT + {ASL_WEIGHT}×ASL"
+    )
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_epoch     = 0
@@ -700,6 +730,7 @@ def main():
                 "l1_weight": L1_WEIGHT,
                 "ssim_weight": SSIM_WEIGHT,
                 "fft_weight": FFT_WEIGHT,
+                "asl_weight": ASL_WEIGHT,
                 "amp": use_amp,
             }, indent=2), encoding="utf-8")
 
@@ -735,6 +766,7 @@ def main():
         "l1_weight": L1_WEIGHT,
         "ssim_weight": SSIM_WEIGHT,
         "fft_weight": FFT_WEIGHT,
+        "asl_weight": ASL_WEIGHT,
         "amp": use_amp,
     }, indent=2), encoding="utf-8")
 
