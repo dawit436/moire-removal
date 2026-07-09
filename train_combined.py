@@ -617,6 +617,109 @@ def main():
             payload["scaler_state"] = scaler.state_dict()
         return payload
 
+    def write_summary(
+        completed: bool,
+        epoch: int,
+        train_loss: float,
+        val_loss: float,
+        val_psnr: float,
+        val_ssim: float,
+        input_psnr: float,
+        input_ssim: float,
+    ):
+        summary_path.write_text(json.dumps({
+            "dataset": args.dataset,
+            "completed": completed,
+            "latest_epoch": epoch,
+            "latest_train_loss": train_loss,
+            "latest_val_loss": val_loss,
+            "latest_val_psnr": val_psnr,
+            "latest_val_ssim": val_ssim,
+            "latest_input_psnr": input_psnr,
+            "latest_input_ssim": input_ssim,
+            "latest_delta_psnr": val_psnr - input_psnr,
+            "best_epoch": best_epoch,
+            "best_psnr": best_psnr,
+            "best_checkpoint": str(best_ckpt_path),
+            "epochs_requested": EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "accum_steps": ACCUM_STEPS,
+            "crop_size": CROP_SIZE,
+            "scale_jitter": SCALE_JITTER,
+            "hard_crop_candidates": HARD_CROP_CANDIDATES,
+            "learning_rate": LR,
+            "warmup_epochs": WARMUP_EPOCHS,
+            "l1_weight": L1_WEIGHT,
+            "ssim_weight": SSIM_WEIGHT,
+            "fft_weight": FFT_WEIGHT,
+            "asl_weight": ASL_WEIGHT,
+            "amp": use_amp,
+        }, indent=2), encoding="utf-8")
+
+    def mirror_and_bundle_kaggle_outputs(epoch: int, current_ckpt_path: Path | None = None):
+        if not Path("/kaggle").exists():
+            return
+
+        kaggle_working = Path("/kaggle/working")
+        artifact_map = {}
+
+        def add_artifact(path: Path | None, name: str | None = None):
+            if path is not None and path.exists():
+                artifact_map[name or path.name] = path
+
+        add_artifact(best_ckpt_path, best_ckpt_name)
+        add_artifact(last_ckpt_path, last_ckpt_name)
+        add_artifact(current_ckpt_path)
+        add_artifact(summary_path, summary_path.name)
+        for preview in sorted(CKPT_DIR.glob(f"val_preview_{args.dataset}_epoch_*.jpg")):
+            add_artifact(preview)
+
+        if not artifact_map:
+            print("  [WARN] No artifacts found to bundle.")
+            return
+
+        for name, src in artifact_map.items():
+            shutil.copy2(src, kaggle_working / name)
+
+        bundle_dir = kaggle_working / f"mbcnn_{args.dataset}_epoch_{epoch:03d}_bundle"
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest = {
+            "dataset": args.dataset,
+            "epoch": epoch,
+            "best_epoch": best_epoch,
+            "best_psnr": best_psnr,
+            "artifacts": [],
+        }
+        for name, src in artifact_map.items():
+            dst = bundle_dir / name
+            shutil.copy2(src, dst)
+            manifest["artifacts"].append({
+                "name": name,
+                "source": str(src),
+                "size_mb": src.stat().st_size / 1024 / 1024,
+            })
+
+        (bundle_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2),
+            encoding="utf-8",
+        )
+        zip_base = kaggle_working / f"mbcnn_{args.dataset}_epoch_{epoch:03d}_bundle"
+        zip_path = Path(shutil.make_archive(str(zip_base), "zip", bundle_dir))
+        latest_zip = kaggle_working / f"mbcnn_{args.dataset}_latest_bundle.zip"
+        shutil.copy2(zip_path, latest_zip)
+
+        print(
+            f"  Backup ZIP: {zip_path.name} "
+            f"({zip_path.stat().st_size / 1024 / 1024:.2f} MB)"
+        )
+        print(
+            f"  Latest ZIP: {latest_zip.name} "
+            f"({latest_zip.stat().st_size / 1024 / 1024:.2f} MB)"
+        )
+
     if args.resume and isinstance(loaded_ckpt, dict):
         ckpt_best = loaded_ckpt.get("best_psnr", loaded_ckpt.get("val_psnr"))
         if ckpt_best is not None:
@@ -690,6 +793,7 @@ def main():
             best_epoch = epoch
             best_psnr = val_psnr
 
+        ckpt_path = None
         if epoch % SAVE_EVERY == 0:
             ckpt_path = CKPT_DIR / f"mbcnn_{args.dataset}_epoch_{epoch:03d}.pth"
             torch.save(
@@ -744,8 +848,18 @@ def main():
             checkpoint_payload(epoch, val_psnr, val_ssim, input_psnr, input_ssim),
             last_ckpt_path,
         )
+        write_summary(
+            False,
+            epoch,
+            train_loss,
+            val_loss,
+            val_psnr,
+            val_ssim,
+            input_psnr,
+            input_ssim,
+        )
         if Path("/kaggle").exists():
-            shutil.copy(last_ckpt_path, Path("/kaggle/working") / last_ckpt_name)
+            mirror_and_bundle_kaggle_outputs(epoch, ckpt_path)
 
     print(f"\nTraining complete. Best EMA PSNR: {best_psnr:.2f} dB")
     print(f"Best model: {best_ckpt_path}")
@@ -775,10 +889,12 @@ def main():
         kaggle_out = Path("/kaggle/working") / best_ckpt_name
         shutil.copy(best_ckpt_path, kaggle_out)
         shutil.copy(summary_path, Path("/kaggle/working") / summary_path.name)
+        mirror_and_bundle_kaggle_outputs(EPOCHS)
         print(f"\nModel saved to Kaggle output: {kaggle_out}")
         try:
             from IPython.display import FileLink, display
             display(FileLink(str(kaggle_out)))
+            display(FileLink(str(Path("/kaggle/working") / f"mbcnn_{args.dataset}_latest_bundle.zip")))
             print("Click the link above to download the model.")
         except Exception:
             print(f"  from IPython.display import FileLink")
